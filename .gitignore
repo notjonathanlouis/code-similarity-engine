@@ -1,3 +1,36 @@
+# ===========================================
+# Code Similarity Engine - Project Specific
+# ===========================================
+
+# CSE cache (embeddings, state, downloaded models)
+.cse_cache/
+*.cse_state.json
+embeddings.db
+
+# Local test scripts
+test.sh
+test_*.sh
+
+# Internal development docs (not for public)
+docs/SPRINT_*.md
+docs/SPIKE_*.md
+docs/CURRENT_STATUS.md
+docs/ROADMAP.md
+
+# Generated reports (user-specific)
+CSE_REPORT.md
+*_CSE_REPORT.md
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ===========================================
+# Python Standard Ignores
+# ===========================================
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
