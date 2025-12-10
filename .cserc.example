@@ -1,0 +1,85 @@
+# Example CSE configuration file
+#
+# Place this file as .cserc or .cse.toml in your project root
+# CSE will search for config files in the current directory and parent directories
+#
+# Config values override CLI defaults, but explicit CLI arguments override config
+# For example: if config sets threshold = 0.85, but you run "cse --threshold 0.90",
+# the CLI value (0.90) wins.
+
+[cse]
+# Similarity threshold (0.0-1.0)
+# Higher = more strict matching
+# Default: 0.80
+threshold = 0.85
+
+# Minimum chunks per cluster
+# Default: 2
+min_cluster = 3
+
+# Output format: "text", "markdown", or "json"
+# Default: "markdown"
+output = "markdown"
+
+# Glob patterns to exclude (list of strings)
+# Default: []
+exclude = [
+    "**/tests/**",
+    "**/node_modules/**",
+    "**/__pycache__/**",
+    "**/venv/**",
+    "**/build/**",
+    "**/dist/**",
+]
+
+# Only analyze matching paths (list of strings)
+# Default: [] (analyze all)
+focus = [
+    "*.py",
+    "*.js",
+    "*.swift",
+]
+
+# Show verbose progress for all stages
+# Default: false
+verbose = true
+
+# Maximum chunks to process
+# Default: 10000
+max_chunks = 15000
+
+# Embedding batch size
+# Default: 32
+batch_size = 64
+
+# Minimum lines per chunk
+# Default: 5
+min_lines = 10
+
+# Maximum lines per chunk
+# Default: 100
+max_lines = 150
+
+# Use LLM to explain clusters
+# Default: true
+analyze = true
+
+# Path to LLM GGUF model (optional, auto-detected if not specified)
+# llm_model = "/path/to/model.gguf"
+
+# Max clusters to analyze with LLM (optional, analyzes all if not specified)
+# max_analyze = 10
+
+# Use reranker to improve cluster quality
+# Default: true
+rerank = true
+
+# Path to reranker GGUF model (optional, auto-detected if not specified)
+# rerank_model = "/path/to/reranker.gguf"
+
+# Minimum reranker score to keep
+# Default: 0.5
+rerank_threshold = 0.6
+
+# Force language detection (optional)
+# lang = "python"

@@ -1,0 +1,23 @@
+# Core dependencies (no telemetry!)
+click>=8.0
+transformers>=4.30.0      # Direct HF transformers (no sentence-transformers)
+torch>=2.0                # For embeddings
+scikit-learn>=1.0         # Clustering
+numpy>=1.21
+
+# Tree-sitter for AST parsing
+tree-sitter>=0.21
+tree-sitter-python>=0.21
+
+# Optional: Additional language support
+# tree-sitter-swift>=0.21
+# tree-sitter-rust>=0.21
+# tree-sitter-go>=0.21
+# tree-sitter-javascript>=0.21
+# tree-sitter-typescript>=0.21
+
+# Optional: LLM analysis (fully offline with GGUF)
+# llama-cpp-python>=0.2.0
+
+# For model downloads
+huggingface-hub>=0.20.0
