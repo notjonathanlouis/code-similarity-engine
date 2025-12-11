@@ -22,15 +22,35 @@ chunk pairs and filter out low-quality cluster members.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import List, Optional, Tuple, Callable, TYPE_CHECKING
 from pathlib import Path
 import logging
+import os
+import contextlib
 
 if TYPE_CHECKING:
     from .models import Cluster
 
+
+@contextlib.contextmanager
+def _suppress_stderr():
+    """Suppress stderr at OS level to catch C library output like ggml Metal init."""
+    stderr_fd = 2
+    saved = os.dup(stderr_fd)
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, stderr_fd)
+        os.close(devnull)
+        yield
+    finally:
+        os.dup2(saved, stderr_fd)
+        os.close(saved)
+
+
+# Suppress stderr during llama_cpp import (catches Metal init messages)
 try:
-    from llama_cpp import Llama
+    with _suppress_stderr():
+        from llama_cpp import Llama
     LLAMA_CPP_AVAILABLE = True
 except ImportError:
     LLAMA_CPP_AVAILABLE = False
@@ -176,6 +196,7 @@ def rerank_cluster(
     model_path: Optional[Path] = None,
     threshold: float = 0.5,
     verbose: bool = False,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> Tuple["Cluster", RerankResult]:
     """
     Rerank cluster members by similarity to representative chunk.
@@ -185,6 +206,7 @@ def rerank_cluster(
         model_path: Path to reranker GGUF. If None, searches default locations.
         threshold: Minimum score to keep (0.0-1.0)
         verbose: Print progress
+        on_progress: Optional callback (current, total, message) for progress updates
 
     Returns:
         Tuple of (refined_cluster, rerank_result)
@@ -210,14 +232,18 @@ def rerank_cluster(
     if verbose:
         print(f"Loading reranker model: {model_path}")
 
-    # Load model
-    llm = Llama(
-        model_path=str(model_path),
-        n_ctx=2048,
-        n_threads=4,
-        logits_all=True,  # Required for logprobs in _score_pair
-        verbose=False,
-    )
+    if on_progress:
+        on_progress(0, len(cluster.chunks), "Loading reranker model...")
+
+    # Load model (suppress Metal init messages)
+    with _suppress_stderr():
+        llm = Llama(
+            model_path=str(model_path),
+            n_ctx=2048,
+            n_threads=4,
+            logits_all=True,  # Required for logprobs in _score_pair
+            verbose=False,
+        )
 
     # Get representative chunk as query
     rep_chunk = cluster.representative
@@ -228,6 +254,7 @@ def rerank_cluster(
 
     # Score each chunk
     scores = []
+    total_chunks = len(cluster.chunks)
     for i, chunk in enumerate(cluster.chunks):
         if chunk is rep_chunk:
             # Representative chunk always gets perfect score
@@ -236,8 +263,11 @@ def rerank_cluster(
             score = _score_pair(llm, query, chunk.content)
             scores.append(score)
 
+        if on_progress:
+            on_progress(i + 1, total_chunks, f"Scoring chunk {i + 1}/{total_chunks}")
+
         if verbose and (i + 1) % 10 == 0:
-            print(f"  Scored {i + 1}/{len(cluster.chunks)} chunks")
+            print(f"  Scored {i + 1}/{total_chunks} chunks")
 
     # Filter by threshold, but keep at least 2 chunks
     original_size = len(cluster.chunks)
@@ -272,6 +302,9 @@ def rerank_cluster(
               f"({result.filter_rate:.1f}% filtered)")
         print(f"  Score range: {min(scores):.3f} - {max(scores):.3f}")
 
+    if on_progress:
+        on_progress(total_chunks, total_chunks, "Reranking complete")
+
     return filtered_cluster, result
 
 
@@ -281,6 +314,7 @@ def rerank_clusters(
     threshold: float = 0.5,
     verbose: bool = False,
     quiet: bool = False,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> List[Tuple["Cluster", RerankResult]]:
     """
     Rerank multiple clusters. Load model once for efficiency.
@@ -291,6 +325,7 @@ def rerank_clusters(
         threshold: Minimum score to keep (0.0-1.0)
         verbose: Print progress
         quiet: Suppress model loading messages
+        on_progress: Optional callback (current, total, message) for progress updates
 
     Returns:
         List of (refined_cluster, rerank_result) tuples
@@ -316,20 +351,29 @@ def rerank_clusters(
     if verbose and not quiet:
         print(f"Loading reranker model: {model_path}")
 
-    # Load model once
-    llm = Llama(
-        model_path=str(model_path),
-        n_ctx=2048,
-        n_threads=4,
-        logits_all=True,  # Required for logprobs in _score_pair
-        verbose=False,
-    )
+    total_clusters = len(clusters)
+
+    if on_progress:
+        on_progress(0, total_clusters, "Loading reranker model...")
+
+    # Load model once (suppress Metal init messages)
+    with _suppress_stderr():
+        llm = Llama(
+            model_path=str(model_path),
+            n_ctx=2048,
+            n_threads=4,
+            logits_all=True,  # Required for logprobs in _score_pair
+            verbose=False,
+        )
 
     results = []
 
     for cluster_idx, cluster in enumerate(clusters):
+        if on_progress:
+            on_progress(cluster_idx, total_clusters, f"Reranking cluster {cluster_idx + 1}/{total_clusters}")
+
         if verbose:
-            print(f"\nCluster {cluster_idx + 1}/{len(clusters)}: {len(cluster.chunks)} chunks")
+            print(f"\nCluster {cluster_idx + 1}/{total_clusters}: {len(cluster.chunks)} chunks")
 
         # Get representative chunk as query
         rep_chunk = cluster.representative
@@ -377,6 +421,9 @@ def rerank_clusters(
             print(f"  Score range: {min(scores):.3f} - {max(scores):.3f}")
 
         results.append((filtered_cluster, result))
+
+    if on_progress:
+        on_progress(total_clusters, total_clusters, "Reranking complete")
 
     return results
 

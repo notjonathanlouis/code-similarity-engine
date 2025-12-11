@@ -22,7 +22,7 @@ falls back to sliding window for unsupported languages.
 """
 
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import fnmatch
 import os
@@ -60,6 +60,7 @@ def index_codebase(
     max_lines: int = 100,
     max_chunks: int = 10000,
     verbose: bool = False,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> List[CodeChunk]:
     """
     Index a codebase and extract code chunks.
@@ -73,6 +74,7 @@ def index_codebase(
         max_lines: Maximum lines per chunk
         max_chunks: Stop after this many chunks (safety limit)
         verbose: Print progress
+        on_progress: Optional callback for progress updates (current, total, message)
 
     Returns:
         List of CodeChunk objects
@@ -90,6 +92,10 @@ def index_codebase(
 
     if verbose:
         print(f"   Found {len(source_files)} source files")
+
+    # Report scanning complete
+    if on_progress:
+        on_progress(0, len(source_files), "Scanning files...")
 
     # Process files in parallel
     all_chunks: List[CodeChunk] = []
@@ -117,6 +123,11 @@ def index_codebase(
                 all_chunks.extend(chunks)
                 processed += 1
 
+                # Report progress
+                file_path = futures[future]
+                if on_progress:
+                    on_progress(processed, len(source_files), f"Indexing {file_path.name}")
+
                 if verbose and processed % 50 == 0:
                     print(f"   Processed {processed}/{len(source_files)} files...")
 
@@ -128,6 +139,10 @@ def index_codebase(
     # Trim to max_chunks if needed
     if len(all_chunks) > max_chunks:
         all_chunks = all_chunks[:max_chunks]
+
+    # Report completion
+    if on_progress:
+        on_progress(processed, len(source_files), "Indexing complete")
 
     return all_chunks
 

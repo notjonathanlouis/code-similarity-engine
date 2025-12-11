@@ -188,7 +188,7 @@ def save_state(project_root: Path, state: RunState):
     with open(temp_path, 'w') as f:
         json.dump(data, f, indent=2)
 
-    temp_path.rename(state_path)
+    temp_path.replace(state_path)  # replace() works on Windows (rename doesn't overwrite)
 
 
 def clear_state(project_root: Path) -> bool:

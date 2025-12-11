@@ -20,10 +20,27 @@ LLM-based cluster analyzer - explains similarities and suggests abstractions.
 Uses llama-cpp-python with Qwen3-0.6B GGUF for fully offline inference.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Callable
 from pathlib import Path
 from dataclasses import dataclass
 import json
+import os
+import contextlib
+
+
+@contextlib.contextmanager
+def _suppress_stderr():
+    """Suppress stderr at OS level to catch C library output like ggml Metal init."""
+    stderr_fd = 2
+    saved = os.dup(stderr_fd)
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, stderr_fd)
+        os.close(devnull)
+        yield
+    finally:
+        os.dup2(saved, stderr_fd)
+        os.close(saved)
 
 
 @dataclass
@@ -79,7 +96,8 @@ def analyze_cluster(
         return None
 
     try:
-        from llama_cpp import Llama
+        with _suppress_stderr():
+            from llama_cpp import Llama
     except ImportError:
         if verbose:
             print("   ⚠️  llama-cpp-python not installed")
@@ -89,13 +107,14 @@ def analyze_cluster(
     if verbose:
         print(f"   Loading LLM: {model_file.name}")
 
-    llm = Llama(
-        model_path=str(model_file),
-        n_ctx=8192,       # Larger context for detailed prompts
-        n_threads=4,
-        n_gpu_layers=-1,  # Use GPU if available
-        verbose=False,
-    )
+    with _suppress_stderr():
+        llm = Llama(
+            model_path=str(model_file),
+            n_ctx=8192,       # Larger context for detailed prompts
+            n_threads=4,
+            n_gpu_layers=-1,  # Use GPU if available
+            verbose=False,
+        )
 
     # Build prompt
     prompt = _build_analysis_prompt(cluster)
@@ -143,7 +162,8 @@ def analyze_clusters(
         return {}
 
     try:
-        from llama_cpp import Llama
+        with _suppress_stderr():
+            from llama_cpp import Llama
     except ImportError:
         if verbose:
             print("   ⚠️  llama-cpp-python not installed")
@@ -153,13 +173,14 @@ def analyze_clusters(
     if verbose and not quiet:
         print(f"   Loading LLM: {model_file.name}")
 
-    llm = Llama(
-        model_path=str(model_file),
-        n_ctx=8192,       # Larger context for detailed prompts
-        n_threads=4,
-        n_gpu_layers=-1,  # Use GPU if available
-        verbose=False,
-    )
+    with _suppress_stderr():
+        llm = Llama(
+            model_path=str(model_file),
+            n_ctx=8192,       # Larger context for detailed prompts
+            n_threads=4,
+            n_gpu_layers=-1,  # Use GPU if available
+            verbose=False,
+        )
 
     results = {}
     # If max_clusters is None, analyze all clusters
@@ -196,6 +217,7 @@ def analyze_clusters_incremental(
     clusters: List["Cluster"],
     existing_analyses: dict[int, ClusterAnalysis] = None,
     on_analysis_complete: callable = None,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
     model_path: Optional[Path] = None,
     max_clusters: Optional[int] = None,
     verbose: bool = False,
@@ -208,6 +230,7 @@ def analyze_clusters_incremental(
         clusters: List of Cluster objects
         existing_analyses: Already-completed analyses to skip
         on_analysis_complete: Callback(cluster_id, analysis) called after each success
+        on_progress: Optional callback(current, total, message) for progress updates
         model_path: Path to GGUF model
         max_clusters: Maximum clusters to analyze
         verbose: Print progress
@@ -229,36 +252,47 @@ def analyze_clusters_incremental(
         return results, failed
 
     try:
-        from llama_cpp import Llama
+        with _suppress_stderr():
+            from llama_cpp import Llama
     except ImportError:
         if verbose:
             print("   ⚠️  llama-cpp-python not installed")
         return results, failed
 
+    # Filter to clusters we haven't analyzed yet
+    clusters_to_analyze = clusters if max_clusters is None else clusters[:max_clusters]
+    pending = [c for c in clusters_to_analyze if c.id not in existing]
+    total_to_analyze = len(clusters_to_analyze)
+
+    # Progress callback: Loading model
+    if on_progress:
+        on_progress(0, total_to_analyze, "Loading LLM model...")
+
     # Load model once
     if verbose and not quiet:
         print(f"   Loading LLM: {model_file.name}")
 
-    llm = Llama(
-        model_path=str(model_file),
-        n_ctx=8192,
-        n_threads=4,
-        n_gpu_layers=-1,
-        verbose=False,
+    with _suppress_stderr():
+        llm = Llama(
+            model_path=str(model_file),
+            n_ctx=8192,
+            n_threads=4,
+            n_gpu_layers=-1,
+            verbose=False,
     )
-
-    # Filter to clusters we haven't analyzed yet
-    clusters_to_analyze = clusters if max_clusters is None else clusters[:max_clusters]
-    pending = [c for c in clusters_to_analyze if c.id not in existing]
 
     if verbose and existing:
         print(f"   Resuming: {len(existing)} already done, {len(pending)} remaining")
 
     for i, cluster in enumerate(pending):
+        total_done = len(existing) + i
+
+        # Progress callback: Analyzing cluster
+        if on_progress:
+            on_progress(total_done, total_to_analyze, f"Analyzing cluster {total_done + 1}/{total_to_analyze}")
+
         if verbose:
-            total_done = len(existing) + i
-            total = len(clusters_to_analyze)
-            print(f"   Analyzing cluster {total_done + 1}/{total} (ID: {cluster.id})...")
+            print(f"   Analyzing cluster {total_done + 1}/{total_to_analyze} (ID: {cluster.id})...")
 
         prompt = _build_analysis_prompt(cluster)
 
@@ -292,6 +326,10 @@ def analyze_clusters_incremental(
             failed.append(cluster.id)
             if verbose:
                 print(f"   ⚠️  Failed cluster {cluster.id}: {e}")
+
+    # Progress callback: Complete
+    if on_progress:
+        on_progress(total_to_analyze, total_to_analyze, f"Analyzed {total_to_analyze} clusters")
 
     return results, failed
 
@@ -533,14 +571,15 @@ def _init_worker(model_path: str):
 
     _worker_model_path = model_path
 
-    from llama_cpp import Llama
-    _worker_llm = Llama(
-        model_path=model_path,
-        n_ctx=8192,
-        n_threads=2,  # Fewer threads per worker to share CPU
-        n_gpu_layers=-1,
-        verbose=False,
-    )
+    with _suppress_stderr():
+        from llama_cpp import Llama
+        _worker_llm = Llama(
+            model_path=model_path,
+            n_ctx=8192,
+            n_threads=2,  # Fewer threads per worker to share CPU
+            n_gpu_layers=-1,
+            verbose=False,
+        )
 
 
 def _analyze_cluster_worker(cluster_data: dict) -> tuple[int, Optional[ClusterAnalysis]]:
@@ -627,6 +666,7 @@ def _cluster_to_dict(cluster) -> dict:
 def analyze_clusters_parallel(
     clusters: List["Cluster"],
     existing_analyses: dict[int, ClusterAnalysis] = None,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
     model_path: Optional[Path] = None,
     max_clusters: Optional[int] = None,
     num_workers: int = 2,
@@ -641,6 +681,7 @@ def analyze_clusters_parallel(
     Args:
         clusters: List of Cluster objects
         existing_analyses: Already-completed analyses to skip
+        on_progress: Optional callback(current, total, message) for progress updates
         model_path: Path to GGUF model
         max_clusters: Maximum clusters to analyze
         num_workers: Number of parallel workers (default: 2)
@@ -664,6 +705,11 @@ def analyze_clusters_parallel(
     # Filter to clusters we haven't analyzed yet
     clusters_to_analyze = clusters if max_clusters is None else clusters[:max_clusters]
     pending = [c for c in clusters_to_analyze if c.id not in existing]
+    total_to_analyze = len(clusters_to_analyze)
+
+    # Progress callback: Starting workers
+    if on_progress:
+        on_progress(0, total_to_analyze, f"Starting {num_workers} workers...")
 
     if verbose:
         print(f"   Parallel analysis with {num_workers} workers...")
@@ -671,6 +717,9 @@ def analyze_clusters_parallel(
             print(f"   Resuming: {len(existing)} already done, {len(pending)} remaining")
 
     if not pending:
+        # If nothing to do, still report completion
+        if on_progress:
+            on_progress(total_to_analyze, total_to_analyze, f"Analyzed {total_to_analyze} clusters")
         return results, failed
 
     # Convert clusters to serializable dicts
@@ -686,7 +735,14 @@ def analyze_clusters_parallel(
         initargs=(str(model_file),)
     ) as pool:
         # imap_unordered for progress as results come in
+        completed = len(existing)
         for i, (cluster_id, analysis) in enumerate(pool.imap_unordered(_analyze_cluster_worker, work_items)):
+            completed += 1
+
+            # Progress callback: Results coming in
+            if on_progress:
+                on_progress(completed, total_to_analyze, f"Analyzed {completed}/{total_to_analyze}")
+
             if analysis:
                 results[cluster_id] = analysis
                 if verbose:
@@ -696,5 +752,9 @@ def analyze_clusters_parallel(
                 failed.append(cluster_id)
                 if verbose:
                     print(f"   [{i+1}/{len(pending)}] Cluster {cluster_id}: ✗ failed")
+
+    # Progress callback: Complete
+    if on_progress:
+        on_progress(total_to_analyze, total_to_analyze, f"Analyzed {total_to_analyze} clusters")
 
     return results, failed

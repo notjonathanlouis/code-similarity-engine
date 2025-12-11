@@ -50,20 +50,20 @@ Settings are applied in this order (later wins):
 ```toml
 [cse]
 threshold = 0.85
-output = "markdown"
+analyze = true
 ```
 
 **Command: `cse ./src`**
 - Uses `threshold = 0.85` (from config)
-- Uses `output = "markdown"` (from config)
+- Uses `analyze = true` (from config)
 
 **Command: `cse ./src --threshold 0.90`**
 - Uses `threshold = 0.90` (explicit CLI arg wins)
-- Uses `output = "markdown"` (from config)
+- Uses `analyze = true` (from config)
 
-**Command: `cse ./src --threshold 0.90 -o json`**
+**Command: `cse ./src --threshold 0.90 --no-analyze`**
 - Uses `threshold = 0.90` (explicit CLI arg wins)
-- Uses `output = "json"` (explicit CLI arg wins)
+- Uses `analyze = false` (explicit CLI arg wins)
 
 ## Available Options
 
@@ -79,8 +79,8 @@ threshold = 0.85
 # Minimum chunks per cluster
 min_cluster = 3
 
-# Output format: "text", "markdown", or "json"
-output = "markdown"
+# Sort clusters by: severity, lines, files, similarity, quick-wins
+sort_by = "severity"
 
 # Show verbose progress
 verbose = true
@@ -127,7 +127,7 @@ max_lines = 150
 
 ```toml
 [cse]
-# Use LLM to explain clusters
+# Use LLM to explain clusters (default: false, run with --analyze to enable)
 analyze = true
 
 # Path to LLM GGUF model (optional, auto-detected if omitted)
@@ -200,9 +200,8 @@ Create `~/.config/cse/.cserc` for personal defaults across all projects:
 ```toml
 [cse]
 verbose = true
-analyze = true
 rerank = true
-output = "markdown"
+sort_by = "severity"
 ```
 
 Then override per-project as needed.
@@ -242,8 +241,7 @@ cse ./src \
   --exclude "**/node_modules/**" \
   --focus "*.py" \
   --analyze \
-  --rerank \
-  -o markdown
+  --rerank
 ```
 
 **After:**
@@ -257,12 +255,11 @@ exclude = ["**/tests/**", "**/node_modules/**"]
 focus = ["*.py"]
 analyze = true
 rerank = true
-output = "markdown"
 ```
 
 Run:
 ```bash
-cse ./src
+cse ./src -o report.md
 ```
 
 ## Troubleshooting

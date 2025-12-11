@@ -57,8 +57,17 @@ pip install code-similarity-engine
 # Download models (~1.4 GB, one-time)
 cse --download-models
 
-# Analyze your project
-cse ./your-project -o html > report.html
+# Prep your project (index, embed, cluster) - results cached to .cse_cache/
+cse ./your-project
+
+# Export a report
+cse ./your-project -o report.html
+
+# Add LLM analysis for refactoring recommendations
+cse ./your-project --analyze
+
+# Export again (now includes analysis)
+cse ./your-project -o report.html
 ```
 
 That's it! CSE will find similar code regions and explain how to refactor them.
@@ -70,8 +79,14 @@ That's it! CSE will find similar code regions and explain how to refactor them.
 ```
 cse <path> [options]
 
+Workflow:
+  cse ./src                  Prep: index, embed, cluster, rerank (cached)
+  cse ./src -o report.md     Export report from cache
+  cse ./src --analyze        Add LLM analysis to cache
+  cse ./src -o report.html   Export again with analysis
+
 Output:
-  -o, --output FORMAT        markdown | html | json | text (default: markdown)
+  -o, --output FILE          Output file path (.md, .html, .json, .txt)
   --sort-by CRITERIA         severity | lines | files | similarity | quick-wins
 
 Filtering:
@@ -83,9 +98,9 @@ Thresholds:
   -t, --threshold FLOAT      Similarity threshold 0.0-1.0 (default: 0.80)
   -m, --min-cluster INT      Minimum chunks per cluster (default: 2)
 
-AI Features (on by default):
-  --analyze / --no-analyze   LLM explanations and recommendations
-  --rerank / --no-rerank     Cross-encoder cluster validation
+AI Features:
+  --analyze / --no-analyze   LLM explanations and recommendations (default: off)
+  --rerank / --no-rerank     Cross-encoder cluster validation (default: on)
 
 Advanced:
   --max-chunks INT           Maximum chunks to process (default: 10000)
@@ -120,10 +135,10 @@ Using tree-sitter as a foundation, CSE performs systematic chunking of the codeb
 ### Multiple Output Formats
 
 ```bash
-cse ./src                          # Markdown (default)
-cse ./src -o html > report.html    # Interactive HTML with dark mode
-cse ./src -o json > report.json    # Machine-readable JSON
-cse ./src -o text                  # Plain text
+cse ./src -o report.md       # Markdown
+cse ./src -o report.html     # Interactive HTML with dark mode
+cse ./src -o report.json     # Machine-readable JSON
+cse ./src -o report.txt      # Plain text
 ```
 
 ### Smart Sorting
@@ -151,20 +166,26 @@ focus = ["*.py", "*.js"]
 ## Usage Examples
 
 ```bash
+# Typical workflow
+cse ./src                              # Prep (fast, cached)
+cse ./src -o report.md                 # Export basic report
+cse ./src --analyze                    # Add LLM analysis (slower)
+cse ./src -o report.html               # Export with recommendations
+
 # Analyze a Swift iOS project
-cse ./MyApp --focus "*.swift"
+cse ./MyApp --focus "*.swift" -o swift_report.html
 
 # Analyze Android project (Java + Kotlin)
-cse ./android-app --focus "*.java" "*.kt"
+cse ./android-app --focus "*.java" --focus "*.kt" -o android.md
 
 # High-precision search (fewer, stronger matches)
-cse ./src --threshold 0.90 --min-cluster 3
+cse ./src --threshold 0.90 --min-cluster 3 -o precise.md
 
-# Quick scan without AI analysis
-cse ./src --no-analyze --no-rerank
+# Quick scan without reranking (fastest)
+cse ./src --no-rerank -o quick.md
 
-# Quiet mode (suppress model loading messages)
-cse ./src -q
+# Quiet mode (suppress progress output)
+cse ./src -q -o report.md
 
 # Verbose mode (show all progress)
 cse ./src -v
@@ -210,9 +231,8 @@ exclude = ["**/tests/**", "**/node_modules/**", "**/vendor/**", "**/__pycache__/
 focus = ["*.py", "*.js", "*.ts"]
 
 # Features
-analyze = true
-rerank = true
-output = "markdown"
+analyze = false   # Set true to always run LLM analysis
+rerank = true     # Cross-encoder validation (recommended)
 sort_by = "severity"
 
 # Display

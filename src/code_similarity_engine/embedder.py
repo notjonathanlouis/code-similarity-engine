@@ -21,9 +21,10 @@ Uses Qwen3-Embedding via llama-cpp-python for fully offline operation.
 Caches embeddings in SQLite to avoid re-embedding unchanged chunks.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Callable
 from pathlib import Path
 import numpy as np
+import os
 
 from .cache import (
     init_cache,
@@ -66,6 +67,7 @@ def embed_chunks(
     batch_size: int = 32,
     verbose: bool = False,
     quiet: bool = False,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> np.ndarray:
     """
     Embed code chunks using Qwen3-Embedding GGUF model.
@@ -79,6 +81,7 @@ def embed_chunks(
         batch_size: Chunks per progress update
         verbose: Print progress
         quiet: Suppress model loading messages
+        on_progress: Optional callback with signature (current, total, message)
 
     Returns:
         NumPy array of shape (n_chunks, embedding_dim)
@@ -105,6 +108,10 @@ def embed_chunks(
         project_root = Path.cwd()
     cache_conn = init_cache(project_root)
 
+    # Report cache check start
+    if on_progress:
+        on_progress(0, len(chunks), "Checking cache...")
+
     # Check cache for each chunk
     all_embeddings = [None] * len(chunks)
     uncached_indices = []
@@ -124,6 +131,11 @@ def embed_chunks(
         else:
             uncached_indices.append(i)
 
+    # Report cache results
+    if on_progress:
+        uncached = len(uncached_indices)
+        on_progress(cache_hits, len(chunks), f"{cache_hits} cached, {uncached} to embed")
+
     if verbose:
         print(f"   Cache: {cache_hits}/{len(chunks)} hits ({len(uncached_indices)} to embed)")
 
@@ -131,13 +143,34 @@ def embed_chunks(
     if not uncached_indices:
         if verbose and not quiet:
             print(f"   All embeddings loaded from cache!")
+        if on_progress:
+            on_progress(len(chunks), len(chunks), "Embedding complete")
         embeddings = np.array(all_embeddings, dtype=np.float32)
         cache_conn.close()
         return embeddings
 
     # Load model only if we need to embed new chunks
+    # Suppress stderr during import AND model loading (catches ggml Metal init messages)
+    import contextlib
+
+    @contextlib.contextmanager
+    def _suppress_stderr():
+        """Suppress stderr at OS level to catch C library output."""
+        import sys
+        stderr_fd = 2
+        saved = os.dup(stderr_fd)
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, stderr_fd)
+            os.close(devnull)
+            yield
+        finally:
+            os.dup2(saved, stderr_fd)
+            os.close(saved)
+
     try:
-        from llama_cpp import Llama
+        with _suppress_stderr():
+            from llama_cpp import Llama
     except ImportError:
         cache_conn.close()
         raise ImportError(
@@ -148,15 +181,16 @@ def embed_chunks(
     if verbose and not quiet:
         print(f"   Loading embedding model: {model_file.name}")
 
-    # Load model in embedding mode
-    llm = Llama(
-        model_path=str(model_file),
-        embedding=True,      # Enable embedding extraction
-        n_ctx=512,           # Context size for embeddings
-        n_threads=4,         # CPU threads
-        n_gpu_layers=-1,     # Use GPU if available (Metal on Mac)
-        verbose=False,       # Suppress llama.cpp output
-    )
+    # Load model in embedding mode (also suppress Metal init messages)
+    with _suppress_stderr():
+        llm = Llama(
+            model_path=str(model_file),
+            embedding=True,      # Enable embedding extraction
+            n_ctx=512,           # Context size for embeddings
+            n_threads=4,         # CPU threads
+            n_gpu_layers=-1,     # Use GPU if available (Metal on Mac)
+            verbose=False,       # Suppress llama.cpp output
+        )
 
     if verbose and not quiet:
         print(f"   Model loaded successfully")
@@ -190,11 +224,22 @@ def embed_chunks(
         )
 
         # Progress reporting
+        if on_progress:
+            on_progress(
+                cache_hits + progress_idx + 1,
+                len(chunks),
+                f"Embedding chunk {progress_idx + 1}/{len(uncached_indices)}"
+            )
+
         if verbose and (progress_idx + 1) % batch_size == 0:
             print(f"   Embedded {progress_idx + 1}/{len(uncached_indices)} new chunks...")
 
     if verbose and len(uncached_indices) % batch_size != 0:
         print(f"   Embedded {len(uncached_indices)}/{len(uncached_indices)} new chunks")
+
+    # Report completion
+    if on_progress:
+        on_progress(len(chunks), len(chunks), "Embedding complete")
 
     cache_conn.close()
 

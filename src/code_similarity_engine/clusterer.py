@@ -21,7 +21,7 @@ Uses Agglomerative Clustering with cosine distance for
 deterministic, density-aware clustering.
 """
 
-from typing import List, Tuple
+from typing import List, Tuple, Callable, Optional
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics.pairwise import cosine_similarity
@@ -35,6 +35,7 @@ def cluster_vectors(
     threshold: float = 0.80,
     min_cluster_size: int = 2,
     verbose: bool = False,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> List[Cluster]:
     """
     Cluster code vectors by semantic similarity.
@@ -45,12 +46,18 @@ def cluster_vectors(
         threshold: Similarity threshold (0.0-1.0)
         min_cluster_size: Minimum members per cluster
         verbose: Print progress
+        on_progress: Optional callback for progress updates.
+                    Signature: on_progress(current: int, total: int, message: str)
 
     Returns:
         List of Cluster objects, sorted by similarity (highest first)
     """
     if len(vectors) < 2:
         return []
+
+    # Stage 1: Starting clustering
+    if on_progress:
+        on_progress(0, 3, "Computing similarity matrix...")
 
     # Convert similarity threshold to distance threshold
     # Cosine distance = 1 - cosine similarity
@@ -66,6 +73,10 @@ def cluster_vectors(
 
     labels = clustering.fit_predict(vectors)
 
+    # Stage 2: Clustering complete
+    if on_progress:
+        on_progress(1, 3, "Finding clusters...")
+
     # Group chunks by cluster label
     cluster_map: dict[int, List[int]] = {}
     for idx, label in enumerate(labels):
@@ -80,6 +91,10 @@ def cluster_vectors(
 
     if verbose:
         print(f"   Raw clusters: {len(set(labels))}, filtered: {len(cluster_map)}")
+
+    # Stage 3: Building cluster objects
+    if on_progress:
+        on_progress(2, 3, "Building cluster objects...")
 
     # Build Cluster objects with similarity scores
     clusters = []
@@ -106,6 +121,10 @@ def cluster_vectors(
     # Renumber cluster IDs to be sequential
     for i, cluster in enumerate(clusters):
         cluster.id = i + 1
+
+    # Stage 4: Complete
+    if on_progress:
+        on_progress(3, 3, f"Found {len(clusters)} clusters")
 
     return clusters
 

@@ -24,13 +24,58 @@ Usage:
     cse --help
 """
 
-import click
-from pathlib import Path
-from typing import Optional
+# === STDERR SUPPRESSION ===
+# Must happen BEFORE any imports that might load llama-cpp
+# The Metal init messages come from C code that ignores Python's stderr
 import sys
 import os
 
+# Set env vars before any llama imports
+os.environ["GGML_LOG_LEVEL"] = "0"
+os.environ["LLAMA_LOG_LEVEL"] = "0"
+os.environ["GGML_METAL_LOG_LEVEL"] = "0"
+
+# For truly stubborn C-level output, we need to redirect fd 2
+# Save original stderr and redirect to devnull during imports
+_original_stderr_fd = os.dup(2)
+_devnull_fd = os.open(os.devnull, os.O_WRONLY)
+os.dup2(_devnull_fd, 2)
+# === END STDERR SUPPRESSION SETUP ===
+
+import click
+from pathlib import Path
+from typing import Optional, Callable
+import contextlib
+import io
+
 from . import __version__
+
+
+@contextlib.contextmanager
+def suppress_stderr():
+    """
+    Suppress stderr at the OS level (captures C library output like llama.cpp).
+
+    This uses os.dup2 to redirect file descriptor 2 (stderr) to /dev/null,
+    which catches output from C extensions that bypass Python's sys.stderr.
+    """
+    # Use raw fd 2 directly, not sys.stderr.fileno() which may be detached
+    stderr_fd = 2
+    saved_stderr = os.dup(stderr_fd)
+
+    try:
+        # Open /dev/null (or NUL on Windows)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        # Redirect stderr to /dev/null
+        os.dup2(devnull, stderr_fd)
+        os.close(devnull)
+        # Also flush Python's stderr buffer
+        sys.stderr.flush()
+        yield
+    finally:
+        # Restore original stderr
+        os.dup2(saved_stderr, stderr_fd)
+        os.close(saved_stderr)
 from .indexer import index_codebase
 from .embedder import embed_chunks, find_embedding_model
 from .clusterer import cluster_vectors
@@ -43,6 +88,22 @@ from .model_manager import (
     download_model,
 )
 from .config import load_config
+
+# === RESTORE STDERR ===
+# Now that imports are done, restore stderr so errors can print
+os.dup2(_original_stderr_fd, 2)
+os.close(_original_stderr_fd)
+os.close(_devnull_fd)
+# === END RESTORE ===
+
+
+# Extension to output format mapping for -o FILE.EXT
+EXTENSION_FORMAT_MAP = {
+    '.md': 'markdown',
+    '.html': 'html',
+    '.json': 'json',
+    '.txt': 'text',
+}
 
 
 def calculate_severity_score(cluster, analysis=None) -> float:
@@ -148,6 +209,20 @@ def merge_config_with_cli(
     return config.get(config_key, default_value)
 
 
+def print_progress(current: int, total: int, message: str, width: int = 30):
+    """Print a progress bar with message."""
+    if total == 0:
+        pct = 100
+    else:
+        pct = int(current / total * 100)
+    filled = int(width * current / max(total, 1))
+    bar = "=" * filled + ">" + " " * (width - filled - 1) if filled < width else "=" * width
+    # Use \r to overwrite line, \033[K to clear to end of line
+    click.echo(f"\r   [{bar}] {current}/{total} {message}\033[K", nl=False)
+    if current >= total:
+        click.echo()  # newline when complete
+
+
 @click.command()
 @click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True), required=False)
 @click.option(
@@ -164,9 +239,9 @@ def merge_config_with_cli(
 )
 @click.option(
     "-o", "--output",
-    type=click.Choice(["text", "markdown", "json", "html"]),
-    default="markdown",
-    help="Output format (default: markdown)"
+    type=str,
+    default=None,
+    help="Output file path (e.g., report.md, output.html, data.json)"
 )
 @click.option(
     "--sort-by",
@@ -221,8 +296,8 @@ def merge_config_with_cli(
 )
 @click.option(
     "--analyze/--no-analyze",
-    default=True,
-    help="Use LLM to explain clusters (default: on, use --no-analyze to skip)"
+    default=False,
+    help="Run LLM analysis on clusters (default: off, use --analyze to enable)"
 )
 @click.option(
     "--llm-model",
@@ -329,19 +404,27 @@ def main(
 
     PATH is the root directory to analyze.
 
-    Examples:
+    Workflow:
 
-      # Basic analysis
+      # Step 1: Prep (index, embed, cluster, rerank) - saves to .cse_cache/
       cse ./src
 
-      # Analyze Swift project with LLM explanations
-      cse ./MyApp --focus "*.swift" --analyze
+      # Step 2: Export report (reads from cache)
+      cse ./src -o report.md
+
+      # Step 3: Add LLM analysis (updates cache)
+      cse ./src --analyze
+
+      # Step 4: Export again (now includes analysis)
+      cse ./src -o report.html
+
+    More examples:
 
       # High-precision search
       cse ./src --threshold 0.90 --min-cluster 3
 
-      # Generate markdown report
-      cse ./lib -o markdown > similarities.md
+      # Focus on specific files
+      cse ./MyApp --focus "*.swift" -o swift_report.md
 
       # Download models first
       cse --download-models
@@ -374,6 +457,7 @@ def main(
         sys.exit(1)
 
     root_path = Path(path).resolve()
+    cache_root = Path.cwd()  # Cache always in CWD, not inside analyzed path
 
     # Load config file and merge with CLI args
     config = load_config(root_path)
@@ -381,12 +465,12 @@ def main(
     # Config values override defaults, but explicit CLI args override config
     threshold = merge_config_with_cli(config, threshold, "threshold", 0.80)
     min_cluster = merge_config_with_cli(config, min_cluster, "min_cluster", 2)
-    output = merge_config_with_cli(config, output, "output", "markdown")
+    # Note: output is now a file path, not a format - skip merge
     max_chunks = merge_config_with_cli(config, max_chunks, "max_chunks", 10000)
     batch_size = merge_config_with_cli(config, batch_size, "batch_size", 32)
     min_lines = merge_config_with_cli(config, min_lines, "min_lines", 5)
     max_lines = merge_config_with_cli(config, max_lines, "max_lines", 100)
-    analyze = merge_config_with_cli(config, analyze, "analyze", True)
+    analyze = merge_config_with_cli(config, analyze, "analyze", False)
     rerank = merge_config_with_cli(config, rerank, "rerank", True)
     rerank_threshold = merge_config_with_cli(config, rerank_threshold, "rerank_threshold", 0.5)
     verbose = merge_config_with_cli(config, verbose, "verbose", False)
@@ -411,15 +495,14 @@ def main(
     if verbose and config:
         click.echo(f"📝 Loaded config from .cserc/.cse.toml")
 
-    # Handle --clear-cache
+    # Handle --clear-cache - exit immediately after
     if clear_cache:
         from .cache import clear_cache as do_clear_cache
-        if do_clear_cache(root_path):
-            if verbose:
-                click.echo("🗑️  Cleared embedding cache")
+        if do_clear_cache(cache_root):
+            click.echo("🗑️  Cleared embedding cache")
         else:
-            if verbose:
-                click.echo("   No cache to clear")
+            click.echo("   No cache to clear")
+        sys.exit(0)  # EXIT HERE
 
     # State management imports
     from .state import (
@@ -428,24 +511,23 @@ def main(
         config_from_cli_args,
     )
 
-    # Handle --show-state
+    # Handle --show-state - exit immediately after
     if show_state:
-        state = load_state(root_path)
+        state = load_state(cache_root)
         if state:
             click.echo("📊 Current analysis state:")
             click.echo(get_progress_summary(state))
         else:
             click.echo("No saved state found.")
-        sys.exit(0)
+        sys.exit(0)  # EXIT HERE
 
-    # Handle --clear-state
+    # Handle --clear-state - exit immediately after
     if clear_state:
-        if do_clear_state(root_path):
+        if do_clear_state(cache_root):
             click.echo("🗑️  Cleared analysis state")
         else:
             click.echo("   No state to clear")
-        if not path:
-            sys.exit(0)
+        sys.exit(0)  # EXIT HERE
 
     # Create current config for state comparison
     current_config = config_from_cli_args(
@@ -464,7 +546,7 @@ def main(
     existing_state = None
     existing_analyses = {}
     if resume:
-        existing_state = load_state(root_path)
+        existing_state = load_state(cache_root)
         if existing_state and existing_state.analyses:
             # Convert AnalysisState to ClusterAnalysis for compatibility
             from .analyzer import ClusterAnalysis
@@ -496,9 +578,7 @@ def main(
             click.echo(f"   Reranking: enabled")
 
     # Stage 1: Index
-    if verbose:
-        click.echo("\n📂 Stage 1/4: Indexing codebase...")
-
+    click.echo("📂 Stage 1: Indexing codebase...")
     chunks = index_codebase(
         root_path=root_path,
         exclude_patterns=list(exclude),
@@ -507,24 +587,22 @@ def main(
         min_lines=min_lines,
         max_lines=max_lines,
         max_chunks=max_chunks,
-        verbose=verbose,
+        verbose=False,  # Use progress callback instead
+        on_progress=lambda c, t, m: print_progress(c, t, m) if not quiet else None,
     )
 
     if not chunks:
         click.echo("❌ No code chunks found. Check your path and filters.", err=True)
         sys.exit(1)
 
-    if verbose:
-        click.echo(f"   Found {len(chunks)} chunks")
+    click.echo(f"   Found {len(chunks)} chunks")
 
     # Stage 2: Embed
-    if verbose:
-        click.echo("\n🧠 Stage 2/4: Generating embeddings...")
+    click.echo("\n🧠 Stage 2: Generating embeddings...")
 
     # Ensure embedding model is available
     if not find_embedding_model():
-        if verbose:
-            click.echo("   No embedding model found, downloading...")
+        click.echo("   No embedding model found, downloading...")
         downloaded = download_model("embedding", verbose=verbose)
         if not downloaded:
             click.echo("❌ Failed to download embedding model.", err=True)
@@ -532,92 +610,93 @@ def main(
             sys.exit(1)
 
     try:
-        vectors = embed_chunks(
-            chunks=chunks,
-            project_root=root_path,
-            batch_size=batch_size,
-            verbose=verbose,
-            quiet=quiet,
-        )
+        with suppress_stderr():
+            vectors = embed_chunks(
+                chunks=chunks,
+                project_root=cache_root,
+                batch_size=batch_size,
+                verbose=False,  # Use progress callback instead
+                quiet=quiet,
+                on_progress=lambda c, t, m: print_progress(c, t, m) if not quiet else None,
+            )
     except (ImportError, FileNotFoundError) as e:
         click.echo(f"❌ Embedding failed: {e}", err=True)
         sys.exit(1)
 
     # Stage 3: Cluster
-    if verbose:
-        click.echo("\n🔗 Stage 3/4: Clustering similar regions...")
+    click.echo("\n🔗 Stage 3: Clustering similar regions...")
 
     clusters = cluster_vectors(
         vectors=vectors,
         chunks=chunks,
         threshold=threshold,
         min_cluster_size=min_cluster,
-        verbose=verbose,
+        verbose=False,  # Use progress callback instead
+        on_progress=lambda c, t, m: print_progress(c, t, m) if not quiet else None,
     )
 
     if not clusters:
         click.echo("✨ No similar regions found above threshold. Your code is unique!")
         sys.exit(0)
 
-    if verbose:
-        click.echo(f"   Found {len(clusters)} clusters")
+    click.echo(f"   Found {len(clusters)} clusters")
 
-    # Stage 3.5: Rerank (optional)
+    # Stage 4: Rerank (optional)
     if rerank and clusters:
-        if verbose:
-            click.echo("\n📊 Stage 3.5: Reranking clusters...")
+        click.echo("\n📊 Stage 4: Reranking clusters...")
 
         # Ensure reranker model is available
         if rerank_model is None and not get_model_path("reranker"):
-            if verbose:
-                click.echo("   No reranker model found, downloading...")
+            click.echo("   No reranker model found, downloading...")
             download_model("reranker", verbose=verbose)
 
         from .reranker import rerank_clusters as do_rerank
 
         try:
-            reranked = do_rerank(
-                clusters=clusters,
-                model_path=Path(rerank_model) if rerank_model else None,
-                threshold=rerank_threshold,
-                verbose=verbose,
-                quiet=quiet,
-            )
+            with suppress_stderr():
+                reranked = do_rerank(
+                    clusters=clusters,
+                    model_path=Path(rerank_model) if rerank_model else None,
+                    threshold=rerank_threshold,
+                    verbose=False,  # Use progress callback instead
+                    quiet=quiet,
+                    on_progress=lambda c, t, m: print_progress(c, t, m) if not quiet else None,
+                )
             # Extract refined clusters
             clusters = [c for c, _ in reranked]
             # Filter out empty clusters
             clusters = [c for c in clusters if len(c.chunks) >= min_cluster]
 
-            if verbose:
-                click.echo(f"   After reranking: {len(clusters)} clusters")
+            click.echo(f"   After reranking: {len(clusters)} clusters")
         except (ImportError, FileNotFoundError) as e:
-            if verbose:
-                click.echo(f"   ⚠️  Reranking skipped: {e}")
+            click.echo(f"   ⚠️  Reranking skipped: {e}")
 
-    # Stage 4: Analyze (optional LLM) - with incremental checkpoints
+    # Stage 5: Analyze (optional LLM) - with incremental checkpoints
     analyses = dict(existing_analyses)  # Start with any resumed analyses
     if analyze:
-        if verbose:
-            click.echo("\n🤖 Stage 4/5: LLM analysis...")
+        # Calculate stage number dynamically
+        stage_num = 5 if rerank else 4
+        click.echo(f"\n🤖 Stage {stage_num}: LLM analysis...")
 
         # Ensure LLM model is available
         if llm_model is None and not get_model_path("llm"):
-            if verbose:
-                click.echo("   No LLM model found, downloading...")
+            click.echo("   No LLM model found, downloading...")
             download_model("llm", verbose=verbose)
 
         from .analyzer import analyze_clusters_incremental, analyze_clusters_parallel, ClusterAnalysis
 
         if parallel > 0:
             # Parallel processing (no incremental callbacks, saves at end)
-            analyses, failed = analyze_clusters_parallel(
-                clusters=clusters,
-                existing_analyses=existing_analyses,
-                model_path=Path(llm_model) if llm_model else None,
-                max_clusters=max_analyze,
-                num_workers=parallel,
-                verbose=verbose,
-            )
+            with suppress_stderr():
+                analyses, failed = analyze_clusters_parallel(
+                    clusters=clusters,
+                    existing_analyses=existing_analyses,
+                    model_path=Path(llm_model) if llm_model else None,
+                    max_clusters=max_analyze,
+                    num_workers=parallel,
+                    verbose=False,
+                    on_progress=lambda c, t, m: print_progress(c, t, m) if not quiet else None,
+                )
 
             # Save all results at once
             for cluster_id, analysis in analyses.items():
@@ -631,7 +710,7 @@ def main(
                         worth_refactoring=analysis.worth_refactoring,
                     )
             run_state.analyses_completed = len(run_state.analyses)
-            save_state(root_path, run_state)
+            save_state(cache_root, run_state)
 
         else:
             # Sequential processing with incremental checkpoints
@@ -645,52 +724,78 @@ def main(
                     worth_refactoring=analysis.worth_refactoring,
                 )
                 run_state.analyses_completed = len(run_state.analyses)
-                save_state(root_path, run_state)
+                save_state(cache_root, run_state)
 
-            analyses, failed = analyze_clusters_incremental(
-                clusters=clusters,
-                existing_analyses=existing_analyses,
-                on_analysis_complete=on_analysis_complete,
-                model_path=Path(llm_model) if llm_model else None,
-                max_clusters=max_analyze,
-                verbose=verbose,
-                quiet=quiet,
-            )
+            with suppress_stderr():
+                analyses, failed = analyze_clusters_incremental(
+                    clusters=clusters,
+                    existing_analyses=existing_analyses,
+                    on_analysis_complete=on_analysis_complete,
+                    model_path=Path(llm_model) if llm_model else None,
+                    max_clusters=max_analyze,
+                    verbose=False,
+                    quiet=quiet,
+                    on_progress=lambda c, t, m: print_progress(c, t, m) if not quiet else None,
+                )
 
         if failed:
             run_state.failed_clusters = failed
-            save_state(root_path, run_state)
-            if verbose:
-                click.echo(f"   ⚠️  {len(failed)} clusters failed to analyze")
+            save_state(cache_root, run_state)
+            click.echo(f"   ⚠️  {len(failed)} clusters failed to analyze")
 
-        if verbose:
-            click.echo(f"   Analyzed {len(analyses)} clusters")
+        click.echo(f"   Analyzed {len(analyses)} clusters")
 
-    # Stage 4.5: Sort clusters
+    # Sort clusters
     if sort_by != "severity" or analyses:  # Always sort if we have analyses or non-default sort
         clusters = sort_clusters(clusters, analyses, sort_by)
-        if verbose:
-            click.echo(f"   Sorted by: {sort_by}")
 
-    # Stage 5: Report
-    stage_num = "5/5" if analyze else "4/4"
-    if verbose:
-        click.echo(f"\n📝 Stage {stage_num}: Generating report...")
-
-    output_format = OutputFormat(output)
-    report = report_clusters(
-        clusters=clusters,
-        root_path=root_path,
-        threshold=threshold,
-        output_format=output_format,
-        analyses=analyses,
-    )
-
-    click.echo(report)
-
-    # Mark state as complete
+    # Mark state as complete (prep done)
     run_state.stage = "complete"
-    save_state(root_path, run_state)
+    save_state(cache_root, run_state)
+
+    # Final Stage: Report (only if -o FILE.EXT provided)
+    if output:
+        output_path = Path(output)
+        ext = output_path.suffix.lower()
+
+        if ext not in EXTENSION_FORMAT_MAP:
+            valid_exts = ', '.join(EXTENSION_FORMAT_MAP.keys())
+            click.echo(f"❌ Invalid output extension '{ext}'. Valid: {valid_exts}", err=True)
+            sys.exit(1)
+
+        # Calculate final stage number dynamically
+        final_stage = 4
+        if rerank:
+            final_stage += 1
+        if analyze:
+            final_stage += 1
+
+        click.echo(f"\n📝 Stage {final_stage}: Generating report...")
+
+        output_format = OutputFormat(EXTENSION_FORMAT_MAP[ext])
+        report = report_clusters(
+            clusters=clusters,
+            root_path=root_path,
+            threshold=threshold,
+            output_format=output_format,
+            analyses=analyses,
+        )
+
+        # Write to file
+        output_path.write_text(report)
+        click.echo(f"   ✅ Report written to: {output_path}")
+
+        if not analyze and analyses == {}:
+            click.echo(f"\n💡 To add LLM insights: cse {path} --analyze && cse {path} -o {output}")
+    else:
+        # No output requested - just show summary
+        click.echo(f"\n✅ Prep complete! Found {len(clusters)} clusters.")
+        click.echo(f"   💾 Cache saved to: .cse_cache/")
+        if not analyze:
+            click.echo(f"\n💡 Next steps:")
+            click.echo(f"   • Export report:    cse {path} -o report.md")
+            click.echo(f"   • Add LLM analysis: cse {path} --analyze")
+            click.echo(f"   • Then export:      cse {path} -o report.html")
 
 
 # Entry point alias for pyproject.toml

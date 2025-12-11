@@ -22,7 +22,6 @@ cse ./src
 threshold = 0.85
 exclude = ["**/tests/**", "**/__pycache__/**", "**/venv/**"]
 focus = ["*.py"]
-analyze = true
 ```
 
 ### JavaScript/TypeScript Project
@@ -32,7 +31,6 @@ analyze = true
 threshold = 0.85
 exclude = ["**/node_modules/**", "**/dist/**", "**/build/**"]
 focus = ["*.js", "*.ts", "*.jsx", "*.tsx"]
-analyze = true
 ```
 
 ### Swift/iOS Project
@@ -42,7 +40,6 @@ analyze = true
 threshold = 0.90
 exclude = ["**/Tests/**", "**/DerivedData/**", "**/.build/**"]
 focus = ["*.swift"]
-analyze = true
 min_cluster = 3
 ```
 
@@ -59,7 +56,6 @@ exclude = [
     "**/build/**",
     "**/dist/**",
 ]
-analyze = true
 rerank = true
 verbose = true
 ```

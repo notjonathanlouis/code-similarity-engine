@@ -23,7 +23,7 @@ helping identify refactoring opportunities that syntactic tools miss.
 No telemetry. Models cached locally after first download.
 """
 
-__version__ = "0.2.6"
+__version__ = "0.3.0"
 
 from .indexer import index_codebase
 from .embedder import embed_chunks
